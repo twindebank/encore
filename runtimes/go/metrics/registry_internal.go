@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -14,6 +15,8 @@ type Registry struct {
 	numSvcs  uint16
 	tsid     uint64
 	registry sync.Map // map[registryKey]*timeseries
+
+	serviceLabels sync.Map // map[string][]KeyValue — extra labels per service name
 }
 
 func NewRegistry(rt *reqtrack.RequestTracker, numServicesInBinary int) *Registry {
@@ -84,6 +87,11 @@ type CollectedMetric struct {
 	Labels       []KeyValue
 	Val          any // []T where T is any of Value
 	Valid        []atomic.Bool
+
+	// ServiceLabels maps service names to additional labels that should be
+	// included when exporting this metric for that service. It is nil when
+	// no service labels have been registered.
+	ServiceLabels map[string][]KeyValue
 }
 
 type registryKey struct {
@@ -121,4 +129,32 @@ func getTS[T any](r *Registry, name string, labels any, info MetricInfo) (ts *ti
 		id:   atomic.AddUint64(&r.tsid, 1),
 	})
 	return val.(*timeseries[T]), loaded
+}
+
+// RegisterServiceLabels registers additional labels to be included with all
+// metrics exported for the named service. This is useful for enriching built-in
+// metrics (like e_requests_total) with custom metadata for alert routing or
+// dashboard filtering.
+//
+// Subsequent calls for the same service replace previous labels.
+func (r *Registry) RegisterServiceLabels(serviceName string, labels map[string]string) {
+	kvs := make([]KeyValue, 0, len(labels))
+	for k, v := range labels {
+		kvs = append(kvs, KeyValue{Key: k, Value: v})
+	}
+	sort.Slice(kvs, func(i, j int) bool { return kvs[i].Key < kvs[j].Key })
+	r.serviceLabels.Store(serviceName, kvs)
+}
+
+// ServiceLabels returns a snapshot of all registered service labels.
+func (r *Registry) ServiceLabels() map[string][]KeyValue {
+	result := make(map[string][]KeyValue)
+	r.serviceLabels.Range(func(key, value any) bool {
+		result[key.(string)] = value.([]KeyValue)
+		return true
+	})
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
